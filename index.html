@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ห้องลองเสื้อออนไลน์</title>
+<style>
+:root{--bg:#eef1f4;--ink:#1c2430;--card:#fff;--accent:#2f5d8a;--line:#d5dbe2}
+@media (prefers-color-scheme:dark){:root{--bg:#151a21;--ink:#e8ecf1;--card:#1f262f;--accent:#7fb0e0;--line:#333c48}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"Noto Sans Thai",system-ui,sans-serif;display:flex;flex-direction:column;align-items:center;gap:16px;padding:20px}
+h1{margin:0;font-size:1.5rem}
+main{display:flex;flex-wrap:wrap;gap:16px;justify-content:center;width:100%;max-width:1000px}
+.stage{position:relative;flex:1 1 560px;background:#000;border-radius:14px;overflow:hidden;min-height:320px}
+canvas{display:block;width:100%;height:auto}
+#msg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#fff;text-align:center;padding:20px;background:rgba(0,0,0,.55)}
+aside{flex:0 1 260px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;display:flex;flex-direction:column;gap:14px}
+h2{margin:0;font-size:1rem}
+.row{display:flex;flex-wrap:wrap;gap:8px}
+button,label.btn{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--ink);padding:8px 12px;border-radius:8px;cursor:pointer}
+button[aria-pressed=true]{background:var(--accent);color:#fff;border-color:var(--accent)}
+button:focus-visible,input:focus-visible+span{outline:3px solid var(--accent);outline-offset:2px}
+.sw{width:34px;height:34px;padding:0;border-radius:50%}
+.sw[aria-pressed=true]{outline:3px solid var(--accent);outline-offset:2px}
+input[type=file]{display:none}
+small{opacity:.7}
+</style>
+</head>
+<body>
+<h1>ห้องลองเสื้อออนไลน์</h1>
+<main>
+  <div class="stage">
+    <canvas id="c" width="960" height="720"></canvas>
+    <div id="msg">กด “เปิดกล้อง” แล้วยืนให้เห็นช่วงไหล่ถึงสะโพก</div>
+  </div>
+  <aside>
+    <button id="start" style="background:var(--accent);color:#fff;border-color:var(--accent)">เปิดกล้อง</button>
+    <div>
+      <h2>ทรงเสื้อ</h2>
+      <div class="row" id="styles"></div>
+    </div>
+    <div>
+      <h2>สี</h2>
+      <div class="row" id="colors"></div>
+    </div>
+    <div>
+      <h2>ใช้รูปเสื้อของคุณเอง</h2>
+      <label class="btn"><input type="file" id="file" accept="image/png,image/webp"><span>อัปโหลด PNG พื้นหลังโปร่งใส</span></label>
+      <button id="clear" style="margin-top:8px">กลับไปใช้เสื้อแบบวาด</button>
+    </div>
+    <button id="shot">บันทึกภาพ</button>
+    <small>ภาพจากกล้องประมวลผลในเครื่องคุณ ไม่ถูกอัปโหลดไปที่ไหน</small>
+  </aside>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/pose.js" crossorigin="anonymous"></script>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const video = document.createElement('video'); video.playsInline = true; video.muted = true;
+const msg = document.getElementById('msg');
+
+let style = 'tee', color = '#c0392b', userImg = null, sm = null;
+
+// เส้นขอบเสื้อ: x คูณความกว้างไหล่, y คูณความสูงลำตัว (ไหล่→สะโพก)
+const shapes = {
+  tee(p){p.moveTo(-.2,-.05);p.quadraticCurveTo(0,.14,.2,-.05);p.lineTo(.62,.08);p.lineTo(.78,.38);p.lineTo(.56,.46);p.lineTo(.46,.30);p.lineTo(.46,1.05);p.quadraticCurveTo(0,1.12,-.46,1.05);p.lineTo(-.46,.30);p.lineTo(-.56,.46);p.lineTo(-.78,.38);p.lineTo(-.62,.08);p.closePath()},
+  long(p){p.moveTo(-.2,-.05);p.quadraticCurveTo(0,.14,.2,-.05);p.lineTo(.62,.08);p.lineTo(.9,.98);p.lineTo(.68,1.02);p.lineTo(.46,.34);p.lineTo(.46,1.05);p.quadraticCurveTo(0,1.12,-.46,1.05);p.lineTo(-.46,.34);p.lineTo(-.68,1.02);p.lineTo(-.9,.98);p.lineTo(-.62,.08);p.closePath()},
+  tank(p){p.moveTo(-.3,-.1);p.lineTo(-.16,-.1);p.quadraticCurveTo(0,.2,.16,-.1);p.lineTo(.3,-.1);p.lineTo(.4,.3);p.lineTo(.46,1.05);p.quadraticCurveTo(0,1.12,-.46,1.05);p.lineTo(-.4,.3);p.closePath()}
+};
+const styleNames = {tee:'เสื้อยืด', long:'แขนยาว', tank:'เสื้อกล้าม'};
+const colors = ['#c0392b','#2f5d8a','#1e8449','#f1c40f','#ffffff','#1c1c1c','#8e44ad'];
+
+const stylesEl = document.getElementById('styles'), colorsEl = document.getElementById('colors');
+Object.keys(styleNames).forEach(k=>{
+  const b=document.createElement('button'); b.textContent=styleNames[k]; b.setAttribute('aria-pressed',k===style);
+  b.onclick=()=>{style=k;userImg=null;[...stylesEl.children].forEach(x=>x.setAttribute('aria-pressed',x===b))};
+  stylesEl.appendChild(b);
+});
+colors.forEach(c=>{
+  const b=document.createElement('button'); b.className='sw'; b.style.background=c; b.setAttribute('aria-label','สี '+c); b.setAttribute('aria-pressed',c===color);
+  b.onclick=()=>{color=c;[...colorsEl.children].forEach(x=>x.setAttribute('aria-pressed',x===b))};
+  colorsEl.appendChild(b);
+});
+document.getElementById('file').onchange=e=>{
+  const f=e.target.files[0]; if(!f) return;
+  const img=new Image(); img.onload=()=>{userImg=img}; img.src=URL.createObjectURL(f);
+};
+document.getElementById('clear').onclick=()=>{userImg=null};
+document.getElementById('shot').onclick=()=>{
+  const a=document.createElement('a'); a.download='tryon.png'; a.href=cv.toDataURL('image/png'); a.click();
+};
+
+const lerp=(a,b,t)=>a+(b-a)*t;
+function smooth(t){ sm = sm ? {x:lerp(sm.x,t.x,.35),y:lerp(sm.y,t.y,.35),W:lerp(sm.W,t.W,.35),H:lerp(sm.H,t.H,.35),a:lerp(sm.a,t.a,.35)} : t; return sm; }
+
+function drawShirt(t){
+  ctx.save();
+  ctx.translate(t.x,t.y); ctx.rotate(t.a);
+  if(userImg){
+    const w=t.W*1.75, h=w*userImg.height/userImg.width;
+    ctx.drawImage(userImg,-w/2,-t.H*.12,w,h);
+  } else {
+    ctx.scale(t.W,t.H);
+    const p=new Path2D(); shapes[style](p);
+    ctx.globalAlpha=.92; ctx.fillStyle=color; ctx.fill(p);
+    ctx.globalAlpha=.25; ctx.fillStyle='#000'; ctx.lineWidth=.012; ctx.strokeStyle='#000'; ctx.stroke(p);
+  }
+  ctx.restore();
+}
+
+function onResults(r){
+  ctx.save(); ctx.clearRect(0,0,cv.width,cv.height);
+  ctx.translate(cv.width,0); ctx.scale(-1,1);          // กลับภาพให้เหมือนกระจก
+  ctx.drawImage(video,0,0,cv.width,cv.height);
+  ctx.restore();
+  const L=r.poseLandmarks;
+  if(!L || L[11].visibility<.5 || L[12].visibility<.5){ msg.style.display='flex'; msg.textContent='ยังไม่เห็นไหล่ ขยับถอยหลังให้เห็นลำตัวท่อนบน'; sm=null; return; }
+  msg.style.display='none';
+  const P=i=>({x:(1-L[i].x)*cv.width,y:L[i].y*cv.height});
+  const ls=P(11), rs=P(12), lh=P(23), rh=P(24);
+  const sx=(ls.x+rs.x)/2, sy=(ls.y+rs.y)/2, hx=(lh.x+rh.x)/2, hy=(lh.y+rh.y)/2;
+  const W=Math.hypot(ls.x-rs.x,ls.y-rs.y);
+  const hipOK=L[23].visibility>.4&&L[24].visibility>.4;
+  const H=hipOK?Math.hypot(hx-sx,hy-sy):W*1.3;
+  const a=Math.atan2(rs.y-ls.y,rs.x-ls.x)+(rs.x<ls.x?0:0);
+  // หลังกลับภาพ ไหล่ซ้ายอยู่ขวาของจอ ปรับมุมให้ x เพิ่มจากซ้ายไปขวา
+  const ang=Math.atan2(ls.y-rs.y,ls.x-rs.x);
+  drawShirt(smooth({x:sx,y:sy,W,H,a:ang}));
+}
+
+document.getElementById('start').onclick=async()=>{
+  const btn=document.getElementById('start'); btn.disabled=true; msg.textContent='กำลังเปิดกล้องและโหลดโมเดล…';
+  try{
+    const stream=await navigator.mediaDevices.getUserMedia({video:{width:960,height:720,facingMode:'user'},audio:false});
+    video.srcObject=stream; await video.play();
+    cv.width=video.videoWidth||960; cv.height=video.videoHeight||720;
+    const pose=new Pose({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/${f}`});
+    pose.setOptions({modelComplexity:1,smoothLandmarks:true,minDetectionConfidence:.5,minTrackingConfidence:.5});
+    pose.onResults(onResults);
+    const loop=async()=>{ if(video.readyState>=2) await pose.send({image:video}); requestAnimationFrame(loop); };
+    loop(); btn.textContent='กล้องทำงานอยู่';
+  }catch(e){
+    msg.textContent='เปิดกล้องไม่ได้: กรุณาอนุญาตการใช้กล้อง และเปิดหน้านี้ผ่าน https หรือ localhost'; btn.disabled=false;
+  }
+};
+</script>
+</body>
+</html>
