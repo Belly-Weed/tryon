@@ -27,7 +27,7 @@ small{opacity:.7}
 </style>
 </head>
 <body>
-<h1>ห้องลองเสื้อออนไลน์ <small>v2</small></h1>
+<h1>ห้องลองเสื้อออนไลน์ <small>v3</small></h1>
 <main>
   <div class="stage">
     <canvas id="c" width="960" height="720"></canvas>
@@ -48,7 +48,7 @@ small{opacity:.7}
       <label class="btn"><input type="file" id="file" accept="image/png,image/webp"><span>อัปโหลด PNG พื้นหลังโปร่งใส</span></label>
       <button id="clear" style="margin-top:8px">กลับไปใช้เสื้อแบบวาด</button>
     </div>
-    <button id="flipbtn" aria-pressed="false">กลับด้านเสื้อ (ถ้าเสื้อกลับหัว)</button>
+    <button id="maskbtn" aria-pressed="true">ตัดเสื้อตามรูปร่างตัว</button>
     <button id="shot">บันทึกภาพ</button>
     <small>ภาพจากกล้องประมวลผลในเครื่องคุณ ไม่ถูกอัปโหลดไปที่ไหน</small>
   </aside>
@@ -56,22 +56,15 @@ small{opacity:.7}
 
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/pose.js" crossorigin="anonymous"></script>
 <script>
-const cv = document.getElementById('c'), ctx = cv.getContext('2d');
-const video = document.createElement('video'); video.playsInline = true; video.muted = true;
-const msg = document.getElementById('msg');
+const cv=document.getElementById('c'), ctx=cv.getContext('2d');
+const oc=document.createElement('canvas'), octx=oc.getContext('2d');
+const video=document.createElement('video'); video.playsInline=true; video.muted=true;
+const msg=document.getElementById('msg');
+let style='tee', color='#c0392b', userImg=null, maskOn=true, sm={};
 
-let flip = false, style = 'tee', color = '#c0392b', userImg = null, sm = null;
-
-// เส้นขอบเสื้อ: x คูณความกว้างไหล่, y คูณความสูงลำตัว (ไหล่→สะโพก)
-const shapes = {
-  tee(p){p.moveTo(-.2,-.05);p.quadraticCurveTo(0,.14,.2,-.05);p.lineTo(.62,.08);p.lineTo(.78,.38);p.lineTo(.56,.46);p.lineTo(.46,.30);p.lineTo(.46,1.05);p.quadraticCurveTo(0,1.12,-.46,1.05);p.lineTo(-.46,.30);p.lineTo(-.56,.46);p.lineTo(-.78,.38);p.lineTo(-.62,.08);p.closePath()},
-  long(p){p.moveTo(-.2,-.05);p.quadraticCurveTo(0,.14,.2,-.05);p.lineTo(.62,.08);p.lineTo(.9,.98);p.lineTo(.68,1.02);p.lineTo(.46,.34);p.lineTo(.46,1.05);p.quadraticCurveTo(0,1.12,-.46,1.05);p.lineTo(-.46,.34);p.lineTo(-.68,1.02);p.lineTo(-.9,.98);p.lineTo(-.62,.08);p.closePath()},
-  tank(p){p.moveTo(-.3,-.1);p.lineTo(-.16,-.1);p.quadraticCurveTo(0,.2,.16,-.1);p.lineTo(.3,-.1);p.lineTo(.4,.3);p.lineTo(.46,1.05);p.quadraticCurveTo(0,1.12,-.46,1.05);p.lineTo(-.4,.3);p.closePath()}
-};
-const styleNames = {tee:'เสื้อยืด', long:'แขนยาว', tank:'เสื้อกล้าม'};
-const colors = ['#c0392b','#2f5d8a','#1e8449','#f1c40f','#ffffff','#1c1c1c','#8e44ad'];
-
-const stylesEl = document.getElementById('styles'), colorsEl = document.getElementById('colors');
+const styleNames={tee:'เสื้อยืด', long:'แขนยาว', tank:'เสื้อกล้าม'};
+const colors=['#c0392b','#2f5d8a','#1e8449','#f1c40f','#ffffff','#1c1c1c','#8e44ad'];
+const stylesEl=document.getElementById('styles'), colorsEl=document.getElementById('colors');
 Object.keys(styleNames).forEach(k=>{
   const b=document.createElement('button'); b.textContent=styleNames[k]; b.setAttribute('aria-pressed',k===style);
   b.onclick=()=>{style=k;userImg=null;[...stylesEl.children].forEach(x=>x.setAttribute('aria-pressed',x===b))};
@@ -82,52 +75,89 @@ colors.forEach(c=>{
   b.onclick=()=>{color=c;[...colorsEl.children].forEach(x=>x.setAttribute('aria-pressed',x===b))};
   colorsEl.appendChild(b);
 });
-document.getElementById('file').onchange=e=>{
-  const f=e.target.files[0]; if(!f) return;
-  const img=new Image(); img.onload=()=>{userImg=img}; img.src=URL.createObjectURL(f);
-};
-document.getElementById('flipbtn').onclick=e=>{flip=!flip;sm=null;e.target.setAttribute('aria-pressed',flip)};
+document.getElementById('file').onchange=e=>{const f=e.target.files[0]; if(!f)return; const i=new Image(); i.onload=()=>{userImg=i}; i.src=URL.createObjectURL(f)};
 document.getElementById('clear').onclick=()=>{userImg=null};
-document.getElementById('shot').onclick=()=>{
-  const a=document.createElement('a'); a.download='tryon.png'; a.href=cv.toDataURL('image/png'); a.click();
-};
+document.getElementById('maskbtn').onclick=e=>{maskOn=!maskOn;e.target.setAttribute('aria-pressed',maskOn)};
+document.getElementById('shot').onclick=()=>{const a=document.createElement('a'); a.download='tryon.png'; a.href=cv.toDataURL('image/png'); a.click()};
 
-const lerp=(a,b,t)=>a+(b-a)*t;
-function smooth(t){ sm = sm ? {x:lerp(sm.x,t.x,.35),y:lerp(sm.y,t.y,.35),W:lerp(sm.W,t.W,.35),H:lerp(sm.H,t.H,.35),a:lerp(sm.a,t.a,.35)} : t; return sm; }
+// ---------- เครื่องมือคำนวณ ----------
+const sub=(a,b)=>({x:a.x-b.x,y:a.y-b.y}), len=a=>Math.hypot(a.x,a.y), mid=(a,b)=>({x:(a.x+b.x)/2,y:(a.y+b.y)/2});
+const norm=a=>{const l=len(a)||1;return{x:a.x/l,y:a.y/l}}, dot=(a,b)=>a.x*b.x+a.y*b.y;
+function smooth(name,raw){const o=sm[name]; return sm[name]=o?{x:o.x+(raw.x-o.x)*.5,y:o.y+(raw.y-o.y)*.5}:raw}
+function smoothPath(pts){ // เส้นโค้งมนผ่านจุดต่างๆ ให้ขอบเสื้อนุ่มเหมือนผ้า
+  const n=pts.length, m=i=>mid(pts[i],pts[(i+1)%n]), p=new Path2D(), s=m(n-1);
+  p.moveTo(s.x,s.y);
+  for(let i=0;i<n;i++){const e=m(i); p.quadraticCurveTo(pts[i].x,pts[i].y,e.x,e.y)}
+  p.closePath(); return p;
+}
+function mirrored(c,img){c.save();c.translate(cv.width,0);c.scale(-1,1);c.drawImage(img,0,0,cv.width,cv.height);c.restore()}
 
-function drawShirt(t){
-  ctx.save();
-  ctx.translate(t.x,t.y); ctx.rotate(t.a);
-  if(userImg){
-    const w=t.W*1.75, h=w*userImg.height/userImg.width;
-    ctx.drawImage(userImg,-w/2,-t.H*.12,w,h);
-  } else {
-    ctx.scale(t.W,t.H);
-    const p=new Path2D(); shapes[style](p);
-    ctx.globalAlpha=.92; ctx.fillStyle=color; ctx.fill(p);
-    ctx.globalAlpha=.25; ctx.fillStyle='#000'; ctx.lineWidth=.012; ctx.strokeStyle='#000'; ctx.stroke(p);
+// ---------- สร้างรูปเสื้อจากจุดจริงบนร่างกาย ----------
+function build(S){
+  const {SL,SR}=S, rv=norm(sub(SR,SL)), W=len(sub(SR,SL)), C=mid(SL,SR);
+  let dv={x:-rv.y,y:rv.x}, H=W*1.3;
+  if(S.hipOK){const t=sub(mid(S.HL,S.HR),C); H=len(t); dv=norm(t)}
+  const at=(b,r,d)=>({x:b.x+rv.x*r+dv.x*d, y:b.y+rv.y*r+dv.y*d});
+  const HL=S.hipOK?S.HL:at(SL,.12*W,H), HR=S.hipOK?S.HR:at(SR,-.12*W,H);
+  const hmL=at(HL,-.1*W,.08*H), hmR=at(HR,.1*W,.08*H);
+  const neckU=[at(C,.1*W,.07*H),at(C,0,.1*H),at(C,-.1*W,.07*H)];
+  const NL=at(C,-.17*W,-.03*H), NR=at(C,.17*W,-.03*H);
+  const AL=at(SL,.04*W,.27*H), AR=at(SR,-.04*W,.27*H);
+  // แขนเสื้อตามแขนจริง: sign=-1 ซ้าย, +1 ขวา
+  function sleeve(sh,el,wr,okE,okW,sign,wid){
+    const outer=sign<0?-1:1;
+    const a=okE?norm(sub(el,sh)):norm({x:rv.x*.3*outer+dv.x,y:rv.y*.3*outer+dv.y});
+    const L1=okE?len(sub(el,sh)):.6*H;
+    const E=okE?el:{x:sh.x+a.x*L1,y:sh.y+a.y*L1};
+    const a2=okW?norm(sub(wr,E)):a, L2=okW?len(sub(wr,E)):L1*.9;
+    const Wr=okW?wr:{x:E.x+a2.x*L2,y:E.y+a2.y*L2};
+    const side=(c,dir,w)=>{let p={x:-dir.y,y:dir.x}; if(dot(p,rv)*outer<0)p={x:-p.x,y:-p.y}; return [{x:c.x+p.x*w,y:c.y+p.y*w},{x:c.x-p.x*w,y:c.y-p.y*w}]};
+    if(style==='long'){const e=side(E,a,wid*1.1), w=side(Wr,a2,wid*.85); return {out:[e[0],w[0]],inn:[w[1],e[1]]}}
+    const m={x:sh.x+a.x*L1*.5,y:sh.y+a.y*L1*.5}, e=side(m,a,wid); return {out:[e[0]],inn:[e[1]]};
   }
-  ctx.restore();
+  let pts;
+  if(style==='tank'){
+    pts=[at(SL,.0*W,-.02*H),at(SL,.06*W,.24*H),hmL,hmR,at(SR,-.06*W,.24*H),at(SR,0,-.02*H),at(SR,-.14*W,-.02*H),at(C,.1*W,.12*H),at(C,0,.17*H),at(C,-.1*W,.12*H),at(SL,.14*W,-.02*H)];
+  } else {
+    const sl=sleeve(SL,S.EL,S.WL,S.elbowOK,S.wristOK,-1,.11*W), sr=sleeve(SR,S.ER,S.WR,S.elbowOK,S.wristOK,1,.11*W);
+    pts=[NL,at(SL,-.1*W,-.02*H),...sl.out,...sl.inn,AL,hmL,hmR,AR,...sr.inn.slice().reverse(),...sr.out.slice().reverse(),at(SR,.1*W,-.02*H),NR,...neckU];
+  }
+  return {pts,W,H,C,dv,neckU:[NR,...neckU,NL],ang:Math.atan2(SR.y-SL.y,SR.x-SL.x)};
 }
 
 function onResults(r){
-  ctx.save(); ctx.clearRect(0,0,cv.width,cv.height);
-  ctx.translate(cv.width,0); ctx.scale(-1,1);          // กลับภาพให้เหมือนกระจก
-  ctx.drawImage(video,0,0,cv.width,cv.height);
-  ctx.restore();
+  const w=cv.width,h=cv.height;
+  ctx.clearRect(0,0,w,h); mirrored(ctx,video);
   const L=r.poseLandmarks;
-  if(!L || L[11].visibility<.5 || L[12].visibility<.5){ msg.style.display='flex'; msg.textContent='ยังไม่เห็นไหล่ ขยับถอยหลังให้เห็นลำตัวท่อนบน'; sm=null; return; }
+  if(!L||L[11].visibility<.5||L[12].visibility<.5){msg.style.display='flex';msg.textContent='ยังไม่เห็นไหล่ ขยับถอยหลังให้เห็นลำตัวท่อนบน';sm={};return}
   msg.style.display='none';
-  const P=i=>({x:(1-L[i].x)*cv.width,y:L[i].y*cv.height});
-  const ls=P(11), rs=P(12), lh=P(23), rh=P(24);
-  const sx=(ls.x+rs.x)/2, sy=(ls.y+rs.y)/2, hx=(lh.x+rh.x)/2, hy=(lh.y+rh.y)/2;
-  const W=Math.hypot(ls.x-rs.x,ls.y-rs.y);
-  const hipOK=L[23].visibility>.4&&L[24].visibility>.4;
-  const H=hipOK?Math.hypot(hx-sx,hy-sy):W*1.3;
-  // หลังกลับภาพ ไหล่ซ้ายของผู้ใช้อยู่ฝั่งซ้ายของจอ มุมไหล่จึงวัดจากซ้ายไปขวา
-  const A=ls.x<=rs.x?ls:rs, B=ls.x<=rs.x?rs:ls;
-  const ang=Math.atan2(B.y-A.y,B.x-A.x)+(flip?Math.PI:0);
-  drawShirt(smooth({x:sx,y:sy,W,H,a:ang}));
+  const P=i=>({x:(1-L[i].x)*w,y:L[i].y*h}), V=i=>L[i].visibility;
+  const lf=P(11).x<=P(12).x, o=lf?[0,1]:[1,0];
+  const id=(a,b)=>[a,b][o[0]===0?0:1], pick=(a,b)=>lf?[a,b]:[b,a];
+  const [s0,s1]=pick(11,12),[e0,e1]=pick(13,14),[w0,w1]=pick(15,16),[h0,h1]=pick(23,24);
+  const S={SL:smooth('SL',P(s0)),SR:smooth('SR',P(s1)),EL:smooth('EL',P(e0)),ER:smooth('ER',P(e1)),WL:smooth('WL',P(w0)),WR:smooth('WR',P(w1)),HL:smooth('HL',P(h0)),HR:smooth('HR',P(h1))};
+  S.hipOK=V(23)>.5&&V(24)>.5; S.elbowOK=V(13)>.5&&V(14)>.5; S.wristOK=V(15)>.5&&V(16)>.5;
+  const g=build(S);
+
+  octx.clearRect(0,0,w,h); octx.save();
+  if(userImg){
+    octx.translate(g.C.x,g.C.y); octx.rotate(g.ang);
+    const iw=g.W*1.75, ih=iw*userImg.height/userImg.width; octx.drawImage(userImg,-iw/2,-g.H*.12,iw,ih);
+  } else {
+    const path=smoothPath(g.pts);
+    octx.fillStyle=color; octx.fill(path);
+    octx.save(); octx.clip(path);
+    octx.globalCompositeOperation='overlay'; octx.globalAlpha=.55; mirrored(octx,video); // เอาแสงเงาจริงจากตัวคุณมาใส่ผ้า
+    octx.globalAlpha=1; octx.globalCompositeOperation='source-over';
+    const gr=octx.createLinearGradient(g.C.x,g.C.y,g.C.x+g.dv.x*g.H,g.C.y+g.dv.y*g.H);
+    gr.addColorStop(0,'rgba(255,255,255,.08)'); gr.addColorStop(1,'rgba(0,0,0,.22)');
+    octx.fillStyle=gr; octx.fillRect(0,0,w,h); octx.restore();
+    if(style!=='tank'){octx.strokeStyle='rgba(0,0,0,.28)';octx.lineWidth=Math.max(2,g.W*.03);octx.lineCap='round';octx.lineJoin='round';
+      octx.beginPath(); g.neckU.forEach((p,i)=>i?octx.lineTo(p.x,p.y):octx.moveTo(p.x,p.y)); octx.stroke()}
+  }
+  octx.restore();
+  if(maskOn&&r.segmentationMask){octx.globalCompositeOperation='destination-in'; mirrored(octx,r.segmentationMask); octx.globalCompositeOperation='source-over'}
+  ctx.drawImage(oc,0,0);
 }
 
 document.getElementById('start').onclick=async()=>{
@@ -135,15 +165,13 @@ document.getElementById('start').onclick=async()=>{
   try{
     const stream=await navigator.mediaDevices.getUserMedia({video:{width:960,height:720,facingMode:'user'},audio:false});
     video.srcObject=stream; await video.play();
-    cv.width=video.videoWidth||960; cv.height=video.videoHeight||720;
+    cv.width=oc.width=video.videoWidth||960; cv.height=oc.height=video.videoHeight||720;
     const pose=new Pose({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/${f}`});
-    pose.setOptions({modelComplexity:1,smoothLandmarks:true,minDetectionConfidence:.5,minTrackingConfidence:.5});
+    pose.setOptions({modelComplexity:1,smoothLandmarks:true,enableSegmentation:true,smoothSegmentation:true,minDetectionConfidence:.5,minTrackingConfidence:.5});
     pose.onResults(onResults);
-    const loop=async()=>{ if(video.readyState>=2) await pose.send({image:video}); requestAnimationFrame(loop); };
+    const loop=async()=>{if(video.readyState>=2)await pose.send({image:video});requestAnimationFrame(loop)};
     loop(); btn.textContent='กล้องทำงานอยู่';
-  }catch(e){
-    msg.textContent='เปิดกล้องไม่ได้: กรุณาอนุญาตการใช้กล้อง และเปิดหน้านี้ผ่าน https หรือ localhost'; btn.disabled=false;
-  }
+  }catch(e){msg.textContent='เปิดกล้องไม่ได้: กรุณาอนุญาตการใช้กล้อง และเปิดหน้านี้ผ่าน https หรือ localhost'; btn.disabled=false}
 };
 </script>
 </body>
